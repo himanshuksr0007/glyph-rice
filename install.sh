@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Galaga: installs everything on a clean Arch and links the configs from this repo.
 #   ./install.sh                   guided: every question first (extras, file manager, login
-#                                  screen, mouse), one password, then it runs to the end by itself
+#                                  screen, boot screen, mouse), one password, then it runs to the end
 #   ./install.sh --dry-run         the guided flow, printing what it would do; changes nothing
 #   ./install.sh --with telegram   same without the questions (--with "" -- just the rice itself)
 #   ./install.sh --browsers zen,firefox
@@ -686,9 +686,10 @@ flatpak_gtk() { # flatpak apps are sandboxed off from ~/.config/gtk-* -- grant t
     done
 }
 
-LOGIN="" FILES=""
-ask_setup() { # every question first (AMM021's flow): the file manager and the login screen are
-    # asked here, the extras in extras() -- after that, one password and no more questions.
+LOGIN="" FILES="" BOOT=""
+ask_setup() { # every question first (AMM021's flow): the file manager, the login screen
+    # and the boot screen are asked here, the extras in extras() -- after that, one
+    # password and no more questions.
     # Only at a terminal and only without --with: scripts and pipes get the defaults.
     [ -z "${WITH+x}" ] && { : </dev/tty; } 2>/dev/null || return 0
     say "a few choices (Enter keeps the default)"
@@ -710,6 +711,23 @@ ask_setup() { # every question first (AMM021's flow): the file manager and the l
         printf '  login screen [keep] / galaga: '
         read -r a </dev/tty || a=""
         case "$a" in galaga) LOGIN=greeter ;; *) LOGIN="" ;; esac
+    fi
+    # the boot screen: quiet is the splash with no text, verbose is the boot
+    # logs on the console. The starting answer is the state the machine is
+    # already in (qb_boot_default, in the quiet-boot block below), so pressing
+    # Enter through a re-run flips nothing; install_flow applies the pick at
+    # the end through quiet_boot itself, the --quiet-boot modes' own path
+    BOOT=$(qb_boot_default)
+    if picker_tty; then # picked from a list, like the questions above
+        pick_one "boot screen" "$BOOT" \
+            "quiet|quiet -- the splash, no boot text" \
+            "verbose|verbose -- show the boot logs"
+        BOOT=$PICK_OUT
+    else
+        local other=verbose; [ "$BOOT" = verbose ] && other=quiet
+        printf '  boot screen [%s] / %s: ' "$BOOT" "$other"
+        read -r a </dev/tty || a=""
+        case "$a" in quiet | verbose) BOOT=$a ;; esac
     fi
     # the mouse: scroll direction, wheel speed, pointer speed. mouse_seed() writes the
     # answers into rules.json (the shell's settings -- Prefs -> INPUT edits the same
@@ -1021,6 +1039,14 @@ install_flow() { # the guided install: questions, one password, then straight th
     case "$LOGIN" in
         greeter) if [ "$DRY" = 1 ]; then note "would run the greeter step (./install.sh --greeter)"; else greeter; fi ;;
     esac
+    # the boot screen, applied through the modes' own function -- and after the
+    # greeter step, so a greeter config installed by this same run gets its
+    # quiet wrap too. No BOOT (a script, a pipe, --with): left exactly as it is
+    case "$BOOT" in
+        quiet) quiet_boot on ;;
+        verbose) quiet_boot off ;;
+        *) note "boot screen: left as it is -- no answer was given, and a scripted run never changes the boot (./install.sh --quiet-boot / --no-quiet-boot change it any time)" ;;
+    esac
     # spicetify needs Spotify already downloaded and logged in, so there is nothing to apply before the first launch
     [[ " ${WITH//,/ } " == *" spotify "* ]] && say "spotify: launch it, log in, then spicetify config custom_apps marketplace && spicetify backup apply"
     [[ " ${WITH//,/ } " == *" warp "* ]] && say "warp: once -- warp-cli registration new, then warp-cli connect; its icon lives in the tray from the next login"
@@ -1146,6 +1172,9 @@ greeter() { # boot login: greetd + the lock's face as the greeter (./install.sh 
 #   Every edited file is backed up once at <file>.galaga-bak before it moves.
 # Plymouth is only reported on: the splash shows only if plymouth is installed
 # AND in the mkinitcpio HOOKS; neither is installed or re-hooked from here.
+# The guided flow asks the same choice as its boot-screen question and applies
+# the answer through quiet_boot itself; qb_detect_state / qb_boot_default
+# below are what the question reads to start from the machine's own state.
 # The QB_* paths are the real ones; the fixture tests point them at a scratch tree.
 QB_TOKENS=(quiet splash loglevel=3 systemd.show_status=auto rd.systemd.show_status=auto rd.udev.log_level=3)
 QB_BOOT_DIR=${QB_BOOT_DIR:-/boot}
@@ -1333,6 +1362,46 @@ qb_cmdline() { # $1 on|off -- layer 1: the kernel command line, in whichever
             QB_SKIP+=("kernel line: bootloader layout not recognized -- no changes made to it")
         fi
     fi
+}
+
+qb_detect_state() { # -> quiet | verbose | unknown on stdout: what the
+    # machine's kernel line already says, read in the order qb_cmdline edits
+    # them (the first positively recognized line speaks for the machine).
+    # quiet means qb_add would change nothing on it -- our tokens are all
+    # there; recognized without them is verbose; no recognized line at all is
+    # unknown. qb_add's foreign-value notes are silenced: stdout is one word
+    local f lf cmd=""
+    for f in "$QB_BOOT_DIR"/loader/entries/*.conf; do
+        [ -f "$f" ] || continue
+        cmd=$(sed -n 's/^options[[:space:]][[:space:]]*//p' "$f" | head -n 1) || true
+        [ -n "$cmd" ] && break
+    done
+    if [ -z "$cmd" ]; then
+        lf=""
+        if [ -f "$QB_BOOT_DIR/limine.conf" ]; then lf=$QB_BOOT_DIR/limine.conf
+        elif [ -f "$QB_LIMINE_EFI" ]; then lf=$QB_LIMINE_EFI; fi
+        if [ -n "$lf" ]; then
+            cmd=$(sed -n 's/^[[:space:]]*\(kernel_command_line\|cmdline\):[[:space:]]*//p' "$lf" | head -n 1) || true
+        fi
+    fi
+    if [ -z "$cmd" ] && [ -f "$QB_GRUB_CONF" ] && grep -q '^GRUB_CMDLINE_LINUX_DEFAULT[[:space:]]*=' "$QB_GRUB_CONF"; then
+        cmd=$(sed -n 's/^GRUB_CMDLINE_LINUX_DEFAULT[[:space:]]*=[[:space:]]*//p' "$QB_GRUB_CONF" | head -n 1) || true
+        case "$cmd" in
+            \"*\") cmd=${cmd:1:${#cmd}-2} ;;
+            \'*\') cmd=${cmd:1:${#cmd}-2} ;;
+        esac
+    fi
+    if [ -z "$cmd" ]; then printf 'unknown'; return; fi
+    if [ "$(qb_add "$cmd" 2>/dev/null)" = "$cmd" ]; then printf 'quiet'; else printf 'verbose'; fi
+}
+
+qb_boot_default() { # the guided boot-screen question's starting answer: the
+    # machine's own state when it can be told, quiet when it cannot -- a fresh
+    # machine gets the splash, a configured one is never surprised by Enter
+    case "$(qb_detect_state)" in
+        verbose) printf 'verbose' ;;
+        *) printf 'quiet' ;;
+    esac
 }
 
 qb_plymouth_layer() { # report only: 'splash' is on the line now, and the splash
