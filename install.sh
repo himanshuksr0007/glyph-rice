@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Galaga: installs everything on a clean Arch and links the configs from this repo.
 #   ./install.sh                   guided: every question first (extras, file manager, login
-#                                  screen, boot screen, mouse), one password, then it runs to the end
+#                                  screen, boot screen), one password, then it runs to the end
 #   ./install.sh --dry-run         the guided flow, printing what it would do; changes nothing
 #   ./install.sh --with telegram   same without the questions (--with "" -- just the rice itself)
 #   ./install.sh --browsers zen,firefox
@@ -729,78 +729,6 @@ ask_setup() { # every question first (AMM021's flow): the file manager, the logi
         read -r a </dev/tty || a=""
         case "$a" in quiet | verbose) BOOT=$a ;; esac
     fi
-    # the mouse: scroll direction, wheel speed, pointer speed. mouse_seed() writes the
-    # answers into rules.json (the shell's settings -- Prefs -> INPUT edits the same
-    # keys). The defaults below are what rules.json already holds, so on a re-run
-    # pressing Enter through changes nothing; a value Prefs set between the offered
-    # steps rides along as its own "current" row rather than being rounded away
-    MOUSE_NAT=false; MOUSE_SCROLL=100; MOUSE_SENS=0
-    if command -v python3 >/dev/null && [ -r "$HOME/.config/demonshot/rules.json" ]; then
-        local cur
-        cur=$(python3 - "$HOME/.config/demonshot/rules.json" 2>/dev/null <<'PY'
-import json, sys
-try: d = json.load(open(sys.argv[1]))
-except Exception: d = {}
-def i(k, v):
-    try: return int(d.get(k, v))
-    except Exception: return v
-print("true" if d.get("mouseNatural") else "false", i("mouseScroll", 100), i("sens", 0))
-PY
-)
-        read -r MOUSE_NAT MOUSE_SCROLL MOUSE_SENS <<<"${cur:-false 100 0}"
-    fi
-    local dirn=normal; [ "$MOUSE_NAT" = true ] && dirn=inverted
-    if picker_tty; then
-        pick_one "mouse scroll direction" "$dirn" \
-            "normal|normal -- the wheel scrolls the page its way" \
-            "inverted|inverted (natural) -- the page follows the wheel"
-        [ "$PICK_OUT" = inverted ] && MOUSE_NAT=true || MOUSE_NAT=false
-        local sopts=("50|gentle -- 50%" "100|normal -- 100%" "150|fast -- 150%" "200|fastest -- 200%")
-        case "$MOUSE_SCROLL" in 50 | 100 | 150 | 200) ;; *) sopts+=("$MOUSE_SCROLL|current -- $MOUSE_SCROLL%") ;; esac
-        pick_one "mouse scroll speed" "$MOUSE_SCROLL" "${sopts[@]}"
-        MOUSE_SCROLL=$PICK_OUT
-        local popts=("-25|slower -- -25%" "0|normal" "25|faster -- +25%" "50|fastest -- +50%")
-        case "$MOUSE_SENS" in -25 | 0 | 25 | 50) ;; *) popts+=("$MOUSE_SENS|current -- $MOUSE_SENS%") ;; esac
-        pick_one "pointer speed" "$MOUSE_SENS" "${popts[@]}"
-        MOUSE_SENS=$PICK_OUT
-    else
-        printf '  mouse scroll [normal] / inverted: '
-        read -r a </dev/tty || a=""
-        [ "$a" = inverted ] && MOUSE_NAT=true
-        printf '  mouse scroll speed %% [current]: '
-        read -r a </dev/tty || a=""
-        case "$a" in 50 | 100 | 150 | 200) MOUSE_SCROLL=$a ;; esac
-        printf '  pointer speed %% [current]: '
-        read -r a </dev/tty || a=""
-        case "$a" in -25 | 0 | 25 | 50) MOUSE_SENS=$a ;; esac
-    fi
-}
-
-mouse_seed() { # the guided mouse answers -> rules.json, the shell's settings file.
-    # Only the three mouse keys are written; the rest of the file is the shell's own.
-    # No answers (a script, --with, a pipe) -- no seed. "shell sets input" is NOT
-    # touched: if it was turned off in Prefs, the config files stay in charge, as chosen
-    [ -n "${MOUSE_NAT+x}" ] || return 0
-    local file="$HOME/.config/demonshot/rules.json"
-    if [ "$DRY" = 1 ]; then
-        note "would set the mouse in $file: scroll $([ "$MOUSE_NAT" = true ] && echo inverted || echo normal), wheel $MOUSE_SCROLL%, pointer $MOUSE_SENS%"
-        return 0
-    fi
-    command -v python3 >/dev/null || { say "mouse: no python3 to write the settings -- set the mouse in Prefs -> INPUT"; return 0; }
-    mkdir -p "${file%/*}"
-    MOUSE_FILE="$file" MOUSE_NAT="$MOUSE_NAT" MOUSE_SCROLL="$MOUSE_SCROLL" MOUSE_SENS="$MOUSE_SENS" python3 - <<'PY' || say "mouse: could not write $file -- set the mouse in Prefs -> INPUT"
-import json, os, tempfile
-p = os.environ["MOUSE_FILE"]
-try:
-    with open(p) as f: d = json.load(f)
-except Exception: d = {}
-d["mouseNatural"] = os.environ["MOUSE_NAT"] == "true"
-d["mouseScroll"] = int(os.environ["MOUSE_SCROLL"])
-d["sens"] = int(os.environ["MOUSE_SENS"])
-fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p))
-with os.fdopen(fd, "w") as f: json.dump(d, f, indent=2)
-os.replace(tmp, p)
-PY
 }
 
 KEEPER=""
@@ -1034,7 +962,7 @@ install_flow() { # the guided install: questions, one password, then straight th
     browsers
     [ "$FILES" = dolphin ] && EXT+=(dolphin kio-extras ffmpegthumbs kdegraphics-thumbnailers archlinux-xdg-menu kde-cli-tools)
     sudo_once
-    packages; plugins; services; links; mouse_seed; browser_cleanup; browser_bind; flatpak_gtk; tmux_theme; pacman_hook
+    packages; plugins; services; links; browser_cleanup; browser_bind; flatpak_gtk; tmux_theme; pacman_hook
     [ -n "$FILES" ] && set_file_manager
     case "$LOGIN" in
         greeter) if [ "$DRY" = 1 ]; then note "would run the greeter step (./install.sh --greeter)"; else greeter; fi ;;
