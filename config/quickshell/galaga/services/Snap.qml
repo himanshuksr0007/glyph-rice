@@ -29,6 +29,12 @@ import qs.settings
 // watcher polls every 200 ms, only while a group exists. Our own dispatch
 // batches are fenced by a 150 ms guard so the poll never mistakes one of our
 // placements for the user dragging a window away.
+//
+// Dragging is the third way in, and the drag tracker at the bottom is its
+// watcher: it samples the focused window and the cursor on its own small
+// fetch. A window that moves at one size, held by one point of it, is a hand
+// drag; the zone under the cursor previews (snap/SnapZone.qml), and letting
+// go on an edge or a corner places the window there.
 Singleton {
     id: root
 
@@ -250,13 +256,15 @@ Singleton {
 
     // snap one window into a rect. The first snap of a window captures what it
     // was (tiled, or floating where) -- that is what restore gives back.
-    function place(addr, rect, zone) {
+    // (preOver: a caller that saw the window before it moved -- the drag
+    // tracker -- hands that state over; a window with a record keeps its own.)
+    function place(addr, rect, zone, preOver) {
         const c = client(addr);
         if (!c) return;
         let rec = recs[addr];
         if (!rec) {
             rec = { zone: "", rect: null, lastZone: "", ws: c.workspace.id,
-                    pre: { floating: !!c.floating, x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] } };
+                    pre: preOver ?? { floating: !!c.floating, x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] } };
         }
         if (rec.zone && rec.zone !== zone) rec.lastZone = rec.zone;
         if ((c.fullscreen ?? 0) > 0)
@@ -449,6 +457,7 @@ Singleton {
                 dropRec(addr);
                 continue;
             }
+            if (dragT && addr === dragT.addr) continue; // in a hand drag: its fate is decided at release
             const cur = rectOf(c);
             if (rectEq(cur, rec.rect, 0)) continue;
             if (Date.now() < guardUntil) { // our own placement landing: just learn it
@@ -513,5 +522,188 @@ Singleton {
             applied = true;
         }
         if (applied) guard();
+    }
+
+    // ---- drag snapping: drag a window to an edge or corner, let go ----
+
+    // the drag cycle's own small fetch: clients, the active window, the
+    // cursor. (The main fetch's monitors give the work areas; if they are
+    // not in yet, dragTick starts that fetch and skips the tick.)
+    property var dsnapC: null
+    property var dsnapA: null
+    property var dsnapPos: null
+    property bool dFetching: false
+    property bool haveDC: false
+    property bool haveDA: false
+    property bool haveDP: false
+
+    Process {
+        id: dc
+        command: ["hyprctl", "clients", "-j"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try { root.dsnapC = JSON.parse(text); } catch (e) { root.dsnapC = null; }
+                root.haveDC = true;
+                root.dFetched();
+            }
+        }
+    }
+    Process {
+        id: da
+        command: ["hyprctl", "activewindow", "-j"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try { root.dsnapA = JSON.parse(text); } catch (e) { root.dsnapA = null; }
+                root.haveDA = true;
+                root.dFetched();
+            }
+        }
+    }
+    Process {
+        id: dpos
+        command: ["hyprctl", "cursorpos"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const p = text.trim().split(",");
+                const x = parseInt(p[0]), y = parseInt(p[1]);
+                root.dsnapPos = isNaN(x) || isNaN(y) ? null : { x: x, y: y };
+                root.haveDP = true;
+                root.dFetched();
+            }
+        }
+    }
+    function dragFetch() {
+        if (dFetching) return;
+        dFetching = true;
+        haveDC = false;
+        haveDA = false;
+        haveDP = false;
+        dc.running = true;
+        da.running = true;
+        dpos.running = true;
+    }
+    function dFetched() {
+        if (!haveDC || !haveDA || !haveDP) return;
+        dFetching = false;
+        dragTick();
+    }
+    Timer {
+        interval: 250
+        repeat: true
+        running: Theme.state.snap && Theme.state.snapDrag && !root.popOpen
+        onTriggered: root.dragFetch()
+    }
+
+    // dragPrev: the last sample of the focused window. dragT: a drag being
+    // tracked. dragZone / dragRect: the preview snap/SnapZone.qml draws.
+    property var dragPrev: null // { addr, x, y, w, h, floating, cx, cy }
+    property var dragT: null    // { addr, offX, offY, lastX, lastY, lastW, lastH, still, pre }
+    property string dragZone: ""
+    property var dragRect: null
+
+    function dragSample(c, cur) {
+        return { addr: c.address, x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1],
+                 floating: !!c.floating, cx: cur.x, cy: cur.y };
+    }
+    function dragAbort() {
+        dragT = null;
+        dragZone = "";
+        dragRect = null;
+    }
+    // the zone the cursor is on: within 6 px of the work area's edges. The
+    // bottom alone is not a zone -- windows maximises at the top, not there.
+    function dragZoneAt(c, cur) {
+        const mon = monOf(c);
+        if (!mon) return null;
+        const wa = workarea(mon);
+        const l = cur.x <= wa.x + 6, r = cur.x >= wa.x + wa.w - 6;
+        const t = cur.y <= wa.y + 6, b = cur.y >= wa.y + wa.h - 6;
+        let zone = "";
+        if (l && t) zone = "TL"; else if (r && t) zone = "TR";
+        else if (l && b) zone = "BL"; else if (r && b) zone = "BR";
+        else if (t) zone = "MAX"; else if (l) zone = "L"; else if (r) zone = "R";
+        return zone ? { zone: zone, rect: zoneRect(zf[zone], wa) } : null;
+    }
+
+    function dragTick() {
+        const a = dsnapA?.address ?? "", cur = dsnapPos;
+        // nothing focused, no cursor, or the popup is up: no drag can be on
+        if (!a || !cur || popOpen) { dragAbort(); dragPrev = null; return; }
+        const c = (dsnapC ?? []).find(x => x.address === a) ?? null;
+        if (!c || c.workspace.id < 0) { dragAbort(); dragPrev = null; return; } // closed, or parked away
+        if (!snapM) { fetch(null); dragPrev = dragSample(c, cur); return; } // zones need the monitors first
+        const r = rectOf(c);
+        const offX = cur.x - r.x, offY = cur.y - r.y; // where the cursor holds the window
+
+        if (dragT) {
+            if (dragT.addr !== a) dragAbort(); // focus went elsewhere mid-drag
+            else if (r.w !== dragT.lastW || r.h !== dragT.lastH
+                     || Math.abs(offX - dragT.offX) > 12 || Math.abs(offY - dragT.offY) > 12) {
+                dragAbort(); // resized, or moved by the keys: not a hand drag any more
+            } else if (r.x !== dragT.lastX || r.y !== dragT.lastY) {
+                dragT.still = 0;
+                dragT.lastX = r.x;
+                dragT.lastY = r.y;
+                const z = dragZoneAt(c, cur);
+                dragZone = z?.zone ?? "";
+                dragRect = z?.rect ?? null;
+                dragPrev = dragSample(c, cur);
+                return;
+            } else if (++dragT.still >= 2) {
+                dragRelease(); // the position held for two ticks: let go
+                dragPrev = null;
+                return;
+            } else {
+                dragPrev = dragSample(c, cur);
+                return;
+            }
+        }
+
+        // begin: the window is floating in the fresh data, it moved since the
+        // last sample at the same size, and the cursor still holds it by the
+        // same point (±12 px) -- a hand drag. A grabbed tiled window is
+        // floating by now (hyprland floats it as the drag starts); the
+        // previous sample remembers what it was, and that state -- the
+        // record's own, if it has one -- is what a restore must give back.
+        const p = dragPrev;
+        if (p && p.addr === a && c.floating
+                && r.w === p.w && r.h === p.h && (r.x !== p.x || r.y !== p.y)
+                && Math.abs(offX - (p.cx - p.x)) <= 12 && Math.abs(offY - (p.cy - p.y)) <= 12) {
+            const rec = recs[a];
+            dragT = { addr: a, offX: offX, offY: offY,
+                      lastX: r.x, lastY: r.y, lastW: r.w, lastH: r.h, still: 0,
+                      pre: rec ? rec.pre : { floating: p.floating, x: p.x, y: p.y, w: p.w, h: p.h } };
+            const z = dragZoneAt(c, cur);
+            dragZone = z?.zone ?? "";
+            dragRect = z?.rect ?? null;
+        }
+        dragPrev = dragSample(c, cur);
+    }
+
+    function dragRelease() {
+        const d = dragT, zone = dragZone;
+        dragAbort();
+        if (!d) return;
+        fetch(() => dragLand(d, zone)); // land on fresh lists, so client() is true
+    }
+    // with a zone: place it (the tick sound is place()'s). With none: a
+    // record whose window was carried somewhere else ends, and the window
+    // stays a free floating window where it was dropped.
+    function dragLand(d, zone) {
+        const c = client(d.addr);
+        if (!c || c.workspace.id < 0) return;
+        if (zone) {
+            const mon = monOf(c);
+            if (!mon) return;
+            place(d.addr, zoneRect(zf[zone], workarea(mon)), zone, d.pre);
+            regroupWs(c.workspace.id);
+        } else {
+            const rec = recs[d.addr];
+            if (rec && !rectEq(rectOf(c), rec.rect, 0)) {
+                const ws = rec.ws;
+                dropRec(d.addr);
+                regroupWs(ws);
+            }
+        }
     }
 }

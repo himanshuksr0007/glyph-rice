@@ -57,6 +57,7 @@ ShellRoot {
     Genie {}
     Shot { id: shot }
     SnapPop {}
+    SnapZone {}
     Vpn { id: vpn }
     LazyLoader { active: !Theme.state.welcomed; Welcome {} } // the first-login card; the features page brings it back
     readonly property bool autoGame: Game.on // starts services/Game: a fullscreen game turns on game mode and dnd
