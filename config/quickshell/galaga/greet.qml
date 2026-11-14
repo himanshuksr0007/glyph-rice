@@ -61,8 +61,11 @@ ShellRoot {
         }
     }
 
-    // sessions: the uwsm Hyprland entry wins (it is the session this machine already runs);
-    // otherwise the first Hyprland entry, otherwise the first entry there is
+    // sessions: the installer's quiet entry wins while it is there (it wraps the
+    // uwsm session and keeps its output in a log -- ./install.sh --quiet-boot);
+    // otherwise the uwsm Hyprland entry wins (it is the session this machine
+    // already runs), otherwise the first Hyprland entry, otherwise the first
+    // entry there is
     Process {
         running: true
         command: ["sh", "-c",
@@ -77,7 +80,7 @@ ShellRoot {
                 let cur = null, inEntry = false;
                 for (const raw of text.split("\n")) {
                     if (raw.startsWith("===\t")) {
-                        cur = { name: "", exec: "", nodisplay: false };
+                        cur = { file: raw.slice(4).split("/").pop(), name: "", exec: "", nodisplay: false };
                         entries.push(cur);
                         inEntry = false;
                         continue;
@@ -94,7 +97,8 @@ ShellRoot {
                     else if (k === "NoDisplay") cur.nodisplay = v === "true";
                 }
                 const usable = entries.filter(e => e.exec && !e.nodisplay);
-                const pick = usable.find(e => /uwsm/i.test(e.exec) && /hyprland/i.test(e.name + " " + e.exec))
+                const pick = usable.find(e => e.file === "galaga.desktop")
+                          || usable.find(e => /uwsm/i.test(e.exec) && /hyprland/i.test(e.name + " " + e.exec))
                           || usable.find(e => /hyprland/i.test(e.name))
                           || usable[0];
                 if (pick) shell.sessionCmd = shell.tokenize(pick.exec);

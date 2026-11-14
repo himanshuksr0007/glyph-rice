@@ -14,7 +14,8 @@
 #   ./install.sh --greeter         boot login: greetd with the galaga face -- REPLACES the current
 #                                  display manager (sddm/...); separate on purpose, prints its rollback
 #   ./install.sh --quiet-boot      a silent boot: the kernel line goes quiet, the splash comes up,
-#                                  nothing prints on the console (--dry-run says what it would do)
+#                                  and the greeter's and the session's output goes to log files
+#                                  instead of the console (--dry-run says what it would do)
 #   ./install.sh --no-quiet-boot   undo --quiet-boot -- the boot text comes back
 set -euo pipefail
 
@@ -1125,8 +1126,17 @@ greeter() { # boot login: greetd + the lock's face as the greeter (./install.sh 
 
 # ---- quiet boot ------------------------------------------------------------------
 # --quiet-boot / --no-quiet-boot: nothing prints on the console on the way to the
-# desktop. Layer 1 is the kernel command line:
-#   the line gains/loses QB_TOKENS -- quiet + the log levels down, splash up.
+# desktop, in three layers:
+#   1. the kernel command line gains/loses QB_TOKENS -- quiet + the log levels
+#      down, splash up.
+#   2. the greeter's launch (our /etc/greetd/config.toml) sends its output to a
+#      log file instead of printing on the console.
+#   3. the user session: a galaga.desktop beside the uwsm Hyprland entry runs
+#      the same command with its output appended to a log in the user's state
+#      dir -- that is where the "Selected compositor ID..." / "Created unit..."
+#      block after login comes from. The greeter face prefers the quiet entry
+#      while it exists (greet.qml), so removing the file is the whole revert
+#      for this layer.
 #   Three layouts are recognized positively (an entry's options line, a limine
 #   kernel_command_line/cmdline line, GRUB_CMDLINE_LINUX_DEFAULT): only those
 #   lines are ever edited, several layouts can coexist and each is edited (the
@@ -1143,6 +1153,10 @@ QB_LIMINE_EFI=${QB_LIMINE_EFI:-/boot/EFI/limine/limine.conf}
 QB_GRUB_CONF=${QB_GRUB_CONF:-/etc/default/grub}
 QB_GRUB_CFG=${QB_GRUB_CFG:-/boot/grub/grub.cfg}
 QB_MKINITCPIO=${QB_MKINITCPIO:-/etc/mkinitcpio.conf}
+QB_GREETD_CONF=${QB_GREETD_CONF:-/etc/greetd/config.toml}
+QB_SESSIONS_DIR=${QB_SESSIONS_DIR:-/usr/share/wayland-sessions}
+QB_GREETER_USER=${QB_GREETER_USER:-greeter}
+QB_GREETER_LOGDIR=${QB_GREETER_LOGDIR:-/var/log/galaga}
 QB_DID=() QB_SKIP=() QB_LAYOUTS=()
 
 qb_add() { # a kernel cmdline -> the same line with our tokens appended. A token
@@ -1183,8 +1197,18 @@ qb_strip() { # a kernel cmdline -> the same line minus exactly our tokens (a key
     printf '%s' "${out[*]}"
 }
 
-qb_xform_line() { # $1 kind (sdboot|limine|grub), $2 on|off, $3 line -> the line,
-    # edited if it is one of the kind's own, untouched otherwise
+qb_greeter_value() { # $1 on|off, $2 the greeter's command -> the command with
+    # (or without) its output sent to the log. Only our exact suffix is ever
+    # added or removed; a redirection of the user's own is not touched here
+    local suffix=" >>$QB_GREETER_LOGDIR/greeter.log 2>&1"
+    case "$1" in
+        on) case "$2" in *">>"*) printf '%s' "$2" ;; *) printf '%s%s' "$2" "$suffix" ;; esac ;;
+        off) case "$2" in *"$suffix") printf '%s' "${2%"$suffix"}" ;; *) printf '%s' "$2" ;; esac ;;
+    esac
+}
+
+qb_xform_line() { # $1 kind (sdboot|limine|grub|greetd), $2 on|off, $3 line ->
+    # the line, edited if it is one of the kind's own, untouched otherwise
     local kind=$1 mode=$2 line=$3 rest pre v inner q
     case "$kind" in
         sdboot)
@@ -1212,6 +1236,11 @@ qb_xform_line() { # $1 kind (sdboot|limine|grub), $2 on|off, $3 line -> the line
                 # spaces it has to be quoted, or grub reads a different line
                 [ -z "$q" ] && case "$inner" in *" "*) q='"' ;; esac
                 printf '%s%s%s%s' "$pre" "$q" "$inner" "$q"
+            else printf '%s' "$line"; fi ;;
+        greetd)
+            if [[ $line =~ ^(command[[:space:]]*=[[:space:]]*\")(.*)\"[[:space:]]*$ ]]; then
+                pre=${BASH_REMATCH[1]} v=${BASH_REMATCH[2]}
+                printf '%s%s"' "$pre" "$(qb_greeter_value "$mode" "$v")"
             else printf '%s' "$line"; fi ;;
         *) printf '%s' "$line" ;;
     esac
@@ -1325,6 +1354,107 @@ qb_plymouth_layer() { # report only: 'splash' is on the line now, and the splash
     esac
 }
 
+qb_greeter_layer() { # $1 on|off -- layer 2: the greeter's own launch. greetd
+    # runs our config's command on the console; wrapped, its output goes to a
+    # log file instead. The log lives in a directory the greeter user owns --
+    # /var/log itself is root's, and a redirection that cannot open would take
+    # the greeter session down with it
+    local mode=$1 conf=$QB_GREETD_CONF
+    [ -f "$conf" ] || { QB_SKIP+=("greeter launch: no $conf -- the galaga greeter is not installed (./install.sh --greeter installs it)"); return 0; }
+    local line value=""
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [[ $line =~ ^command[[:space:]]*=[[:space:]]*\"(.*)\"[[:space:]]*$ ]]; then value=${BASH_REMATCH[1]}; break; fi
+    done <"$conf"
+    case "$value" in
+        "") QB_SKIP+=("greeter launch: no command line in $conf -- left alone"); return 0 ;;
+        start-hyprland*) ;;
+        *) QB_SKIP+=("greeter launch: the command in $conf is not the installer's start-hyprland launch -- left alone"); return 0 ;;
+    esac
+    if [ "$mode" = on ]; then
+        case "$value" in
+            *"$QB_GREETER_LOGDIR/greeter.log"*) QB_SKIP+=("greeter launch: already sends its output to the log"); return 0 ;;
+            *">>"*) QB_SKIP+=("greeter launch: its output already goes somewhere else -- left as it is"); return 0 ;;
+        esac
+        if ! id -u "$QB_GREETER_USER" >/dev/null 2>&1; then
+            QB_SKIP+=("greeter launch: there is no \"$QB_GREETER_USER\" user to own the log -- left unwrapped")
+            return 0
+        fi
+        run sudo install -d -o "$QB_GREETER_USER" -g "$QB_GREETER_USER" -m 0755 "$QB_GREETER_LOGDIR"
+    fi
+    local rc=0
+    qb_apply "$conf" greetd "$mode" || rc=$?
+    case "$mode:$rc" in
+        on:0) QB_DID+=("greeter launch: its output now goes to $QB_GREETER_LOGDIR/greeter.log instead of the console") ;;
+        on:2) QB_SKIP+=("greeter launch: already sends its output to the log") ;;
+        off:0) QB_DID+=("greeter launch: its output is back on the console") ;;
+        off:2) case "$value" in
+            *">>"*) QB_SKIP+=("greeter launch: the redirection there is not ours -- left alone") ;;
+            *) QB_SKIP+=("greeter launch: it is not wrapped -- nothing to undo") ;;
+        esac ;;
+    esac
+    return 0
+}
+
+qb_desktop_key() { # $1 a .desktop file, $2 a key -> its value in [Desktop Entry]
+    awk -v k="$2=" '/^\[/ { e = ($0 == "[Desktop Entry]") } e && index($0, k) == 1 { sub(k, ""); print; exit }' "$1"
+}
+
+qb_session_layer() { # $1 on|off -- layer 3: the user session. The block after
+    # login ("Selected compositor ID...", "Created unit...", "Starting
+    # wayland-session...") is the session command printing on the console. On:
+    # a galaga.desktop is installed next to the uwsm Hyprland entry, running
+    # the SAME command with its output appended to a log in the user's state
+    # dir; the greeter face prefers it while it exists (greet.qml), so off --
+    # deleting the file -- is the whole revert, nothing else to unwind
+    local mode=$1 target=$QB_SESSIONS_DIR/galaga.desktop
+    if [ "$mode" = off ]; then
+        if [ -e "$target" ]; then
+            run sudo rm "$target"
+            QB_DID+=("quiet session removed: $target -- the face picks the uwsm entry again")
+        else
+            QB_SKIP+=("quiet session: $target is not installed")
+        fi
+        return 0
+    fi
+    # the entry to wrap, found by the face's own rule: Exec mentions uwsm,
+    # name+exec mention hyprland
+    local f name ex src="" src_exec=""
+    for f in "$QB_SESSIONS_DIR"/*.desktop; do
+        [ -r "$f" ] || continue
+        [ "$f" = "$target" ] && continue
+        ex=$(qb_desktop_key "$f" Exec)
+        [ -n "$ex" ] || continue
+        case "$ex" in *uwsm* | *UWSM*) ;; *) continue ;; esac
+        name=$(qb_desktop_key "$f" Name)
+        case "$name $ex" in *[Hh]yprland*) src=$f; src_exec=$ex; break ;; esac
+    done
+    if [ -z "$src" ]; then
+        QB_SKIP+=("quiet session: no uwsm Hyprland entry in $QB_SESSIONS_DIR to wrap -- the face's own pick is unchanged")
+        return 0
+    fi
+    case "$src_exec" in
+        *\'*) QB_SKIP+=("quiet session: the Exec in $src quotes in a way the wrap cannot carry -- left alone"); return 0 ;;
+    esac
+    local names content
+    names=$(qb_desktop_key "$src" DesktopNames)
+    content="[Desktop Entry]
+Name=Hyprland (quiet)
+Comment=Hyprland through uwsm, with the session's output kept in a log file
+Exec=sh -c 'mkdir -p \"\$HOME/.local/state/galaga\"; exec $src_exec >>\"\$HOME/.local/state/galaga/session.log\" 2>&1'
+Type=Application"
+    [ -n "$names" ] && content+=$'\n'"DesktopNames=$names"
+    if [ -f "$target" ] && [ "$(cat "$target")" = "$content" ]; then
+        QB_SKIP+=("quiet session: $target is already installed")
+        return 0
+    fi
+    if [ "$DRY" = 1 ]; then
+        note "would install $target (it wraps $src)"
+    else
+        printf '%s\n' "$content" | sudo tee "$target" >/dev/null
+    fi
+    QB_DID+=("quiet session: $target wraps $src, output to ~/.local/state/galaga/session.log")
+}
+
 quiet_boot() { # $1 on|off -- the summary prints what changed and what was left
     # alone and why; nothing here claims a change it did not make
     local mode=$1 x didword=changed
@@ -1333,10 +1463,14 @@ quiet_boot() { # $1 on|off -- the summary prints what changed and what was left
     else say "quiet boot off: the boot text comes back"; fi
     qb_cmdline "$mode"
     [ "$mode" = on ] && qb_plymouth_layer
+    qb_greeter_layer "$mode"
+    qb_session_layer "$mode"
     [ "$DRY" = 1 ] && didword="would change"
     for x in "${QB_DID[@]}"; do note "$didword: $x"; done
     for x in "${QB_SKIP[@]}"; do note "left alone: $x"; done
-    if [ "$mode" = on ]; then say "takes effect from the next boot. undo: ./install.sh --no-quiet-boot"
+    if [ "$mode" = on ]; then
+        note "one heads-up: ./install.sh --greeter rewrites /etc/greetd/config.toml from the repo copy -- re-run --quiet-boot after it"
+        say "takes effect from the next boot. undo: ./install.sh --no-quiet-boot"
     else say "the boot text is back from the next boot"; fi
 }
 # ---- end quiet boot --------------------------------------------------------------
