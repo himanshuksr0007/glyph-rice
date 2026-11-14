@@ -1086,11 +1086,14 @@ greeter() { # boot login: greetd + the lock's face as the greeter (./install.sh 
 #   2. the greeter's launch (our /etc/greetd/config.toml) sends its output to a
 #      log file instead of printing on the console.
 #   3. the user session: a galaga.desktop beside the uwsm Hyprland entry runs
-#      the same command with its output appended to a log in the user's state
-#      dir -- that is where the "Selected compositor ID..." / "Created unit..."
-#      block after login comes from. The greeter face prefers the quiet entry
-#      while it exists (greet.qml), so removing the file is the whole revert
-#      for this layer.
+#      the same command through a helper script (galaga-session, installed in
+#      /usr/local/bin from config/hypr/scripts/) that appends its output to a
+#      log in the user's state dir -- that is where the "Selected compositor
+#      ID..." / "Created unit..." block after login comes from. The entry's
+#      Exec holds plain words only, no quoted shell string: the script
+#      carries the redirection, so every reader of the file splits it the
+#      same way. The greeter face prefers the quiet entry while it exists
+#      (greet.qml), so removing both files is the whole revert for this layer.
 #   Three layouts are recognized positively (an entry's options line, a limine
 #   kernel_command_line/cmdline line, GRUB_CMDLINE_LINUX_DEFAULT): only those
 #   lines are ever edited, several layouts can coexist and each is edited (the
@@ -1112,6 +1115,7 @@ QB_GRUB_CFG=${QB_GRUB_CFG:-/boot/grub/grub.cfg}
 QB_MKINITCPIO=${QB_MKINITCPIO:-/etc/mkinitcpio.conf}
 QB_GREETD_CONF=${QB_GREETD_CONF:-/etc/greetd/config.toml}
 QB_SESSIONS_DIR=${QB_SESSIONS_DIR:-/usr/share/wayland-sessions}
+QB_SESSION_BIN=${QB_SESSION_BIN:-/usr/local/bin/galaga-session}
 QB_GREETER_USER=${QB_GREETER_USER:-greeter}
 QB_GREETER_LOGDIR=${QB_GREETER_LOGDIR:-/var/log/galaga}
 QB_DID=() QB_SKIP=() QB_LAYOUTS=()
@@ -1399,18 +1403,31 @@ qb_desktop_key() { # $1 a .desktop file, $2 a key -> its value in [Desktop Entry
 qb_session_layer() { # $1 on|off -- layer 3: the user session. The block after
     # login ("Selected compositor ID...", "Created unit...", "Starting
     # wayland-session...") is the session command printing on the console. On:
-    # a galaga.desktop is installed next to the uwsm Hyprland entry, running
-    # the SAME command with its output appended to a log in the user's state
-    # dir; the greeter face prefers it while it exists (greet.qml), so off --
-    # deleting the file -- is the whole revert, nothing else to unwind
-    local mode=$1 target=$QB_SESSIONS_DIR/galaga.desktop
+    # the wrapper script config/hypr/scripts/galaga-session.sh is installed
+    # as $QB_SESSION_BIN, and a galaga.desktop beside the uwsm Hyprland entry
+    # runs the SAME command through it -- galaga-session makes the state dir
+    # and appends the session's output to a log there. The wrapper is a
+    # script, not a quoted shell string inside the entry (that is how v1 did
+    # it, and the nested quotes did not survive every reader of the file --
+    # the wrapped command never ran and login looped): the Exec here holds
+    # nothing but plain words, which the greeter face's own tokenizer splits
+    # exactly like any other reader. The face prefers the quiet entry while
+    # it exists (greet.qml), so off -- deleting both files -- is the whole
+    # revert, nothing else to unwind
+    local mode=$1 target=$QB_SESSIONS_DIR/galaga.desktop bin=$QB_SESSION_BIN
     if [ "$mode" = off ]; then
+        local gone=""
         if [ -e "$target" ]; then
             run sudo rm "$target"
             QB_DID+=("quiet session removed: $target -- the face picks the uwsm entry again")
-        else
-            QB_SKIP+=("quiet session: $target is not installed")
+            gone=1
         fi
+        if [ -e "$bin" ]; then
+            run sudo rm "$bin"
+            QB_DID+=("quiet session helper removed: $bin")
+            gone=1
+        fi
+        [ -z "$gone" ] && QB_SKIP+=("quiet session: neither $target nor $bin is installed")
         return 0
     fi
     # the entry to wrap, found by the face's own rule: Exec mentions uwsm,
@@ -1429,15 +1446,34 @@ qb_session_layer() { # $1 on|off -- layer 3: the user session. The block after
         QB_SKIP+=("quiet session: no uwsm Hyprland entry in $QB_SESSIONS_DIR to wrap -- the face's own pick is unchanged")
         return 0
     fi
+    # the wrap adds no quoting of its own, so the command it carries must
+    # need none: a quote or a backslash in the source Exec would mean
+    # different readers split it differently -- such an entry is left alone
     case "$src_exec" in
-        *\'*) QB_SKIP+=("quiet session: the Exec in $src quotes in a way the wrap cannot carry -- left alone"); return 0 ;;
+        *\'* | *\"* | *\\*) QB_SKIP+=("quiet session: the Exec in $src contains a quote or a backslash -- the wrap carries plain words only, left alone"); return 0 ;;
     esac
+    local script=${QB_SESSION_SRC:-$DOTS/config/hypr/scripts/galaga-session.sh}
+    if [ ! -f "$script" ]; then
+        QB_SKIP+=("quiet session: the wrapper script $script is not in this checkout -- left alone")
+        return 0
+    fi
+    # the helper first: the entry is worse than useless without it
+    if [ -f "$bin" ] && cmp -s "$script" "$bin"; then
+        QB_SKIP+=("quiet session helper: $bin is already installed")
+    else
+        if [ "$DRY" = 1 ]; then
+            note "would install $bin (the session wrapper, from $script)"
+        else
+            sudo install -m 0755 "$script" "$bin"
+        fi
+        QB_DID+=("quiet session helper: $bin installed -- it runs the session with its output in ~/.local/state/galaga/session.log")
+    fi
     local names content
     names=$(qb_desktop_key "$src" DesktopNames)
     content="[Desktop Entry]
 Name=Hyprland (quiet)
 Comment=Hyprland through uwsm, with the session's output kept in a log file
-Exec=sh -c 'mkdir -p \"\$HOME/.local/state/galaga\"; exec $src_exec >>\"\$HOME/.local/state/galaga/session.log\" 2>&1'
+Exec=galaga-session $src_exec
 Type=Application"
     [ -n "$names" ] && content+=$'\n'"DesktopNames=$names"
     if [ -f "$target" ] && [ "$(cat "$target")" = "$content" ]; then
@@ -1449,7 +1485,7 @@ Type=Application"
     else
         printf '%s\n' "$content" | sudo tee "$target" >/dev/null
     fi
-    QB_DID+=("quiet session: $target wraps $src, output to ~/.local/state/galaga/session.log")
+    QB_DID+=("quiet session: $target runs $src's command through galaga-session")
 }
 
 quiet_boot() { # $1 on|off -- the summary prints what changed and what was left
