@@ -55,6 +55,7 @@ Singleton {
             property int gapsIn: 6
             property int gapsOut: 14
             property int border: 2
+            property bool resizeBorders: true // resize_on_border: grab a window's border or corner and drag (windows())
             property int rounding: 0
             property bool blur: true
             property bool shadow: true
@@ -261,7 +262,7 @@ Singleton {
     readonly property var scales: ["auto", "1", "1.25", "1.5", "2"]
     function windows() {
         const s = store;
-        hypr(`hl.config({ general = { gaps_in = ${s.gapsIn}, gaps_out = ${s.gapsOut}, border_size = ${s.border} }, `
+        hypr(`hl.config({ general = { gaps_in = ${s.gapsIn}, gaps_out = ${s.gapsOut}, border_size = ${s.border}, resize_on_border = ${s.resizeBorders}, extend_border_grab_area = 12 }, `
            + `decoration = { rounding = ${s.rounding}, blur = { enabled = ${blurOn} }, shadow = { enabled = ${shadowOn} } } })`);
     }
     // ponytail: on/off only; slam/snap -- override the curves from animations.lua

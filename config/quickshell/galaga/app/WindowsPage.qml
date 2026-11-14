@@ -82,6 +82,7 @@ Item {
                                 y: 20
                                 spacing: 9
                                 Lb { text: wnd.index ? "zen" : "kitty"; px: 10; color: wnd.index ? Theme.mute : Theme.grey }
+
                                 Repeater {
                                     model: [0.7, 0.45, 0.85, 0.3, 0.6, 0.5]
                                     Rectangle {
@@ -95,6 +96,9 @@ Item {
                             }
                         }
                     }
+                }
+                SetCard {
+                    SetToggle { label: "resize from the edge"; sub: "grab a window's border or corner and drag"; on: Rules.store.resizeBorders; divider: false; onFlip: want => { Rules.store.resizeBorders = want; Rules.windows(); } }
                 }
             }
 
