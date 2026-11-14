@@ -13,6 +13,9 @@
 #   ./install.sh --links           symlinks only (on an already configured system)
 #   ./install.sh --greeter         boot login: greetd with the galaga face -- REPLACES the current
 #                                  display manager (sddm/...); separate on purpose, prints its rollback
+#   ./install.sh --quiet-boot      a silent boot: the kernel line goes quiet, the splash comes up,
+#                                  nothing prints on the console (--dry-run says what it would do)
+#   ./install.sh --no-quiet-boot   undo --quiet-boot -- the boot text comes back
 set -euo pipefail
 
 DOTS="$(cd "$(dirname "$0")" && pwd)"
@@ -1120,6 +1123,224 @@ greeter() { # boot login: greetd + the lock's face as the greeter (./install.sh 
     say "no login screen at boot? Ctrl+Alt+F3 -> log in on the text console -> run the rollback"
 }
 
+# ---- quiet boot ------------------------------------------------------------------
+# --quiet-boot / --no-quiet-boot: nothing prints on the console on the way to the
+# desktop. Layer 1 is the kernel command line:
+#   the line gains/loses QB_TOKENS -- quiet + the log levels down, splash up.
+#   Three layouts are recognized positively (an entry's options line, a limine
+#   kernel_command_line/cmdline line, GRUB_CMDLINE_LINUX_DEFAULT): only those
+#   lines are ever edited, several layouts can coexist and each is edited (the
+#   tokens are harmless in one that never boots), and anything unrecognized is
+#   left exactly as it is -- a guessed edit here bricks boots. Unified kernel
+#   images carry the line inside the image: recognized, reported, untouchable.
+#   Every edited file is backed up once at <file>.galaga-bak before it moves.
+# Plymouth is only reported on: the splash shows only if plymouth is installed
+# AND in the mkinitcpio HOOKS; neither is installed or re-hooked from here.
+# The QB_* paths are the real ones; the fixture tests point them at a scratch tree.
+QB_TOKENS=(quiet splash loglevel=3 systemd.show_status=auto rd.systemd.show_status=auto rd.udev.log_level=3)
+QB_BOOT_DIR=${QB_BOOT_DIR:-/boot}
+QB_LIMINE_EFI=${QB_LIMINE_EFI:-/boot/EFI/limine/limine.conf}
+QB_GRUB_CONF=${QB_GRUB_CONF:-/etc/default/grub}
+QB_GRUB_CFG=${QB_GRUB_CFG:-/boot/grub/grub.cfg}
+QB_MKINITCPIO=${QB_MKINITCPIO:-/etc/mkinitcpio.conf}
+QB_DID=() QB_SKIP=() QB_LAYOUTS=()
+
+qb_add() { # a kernel cmdline -> the same line with our tokens appended. A token
+    # already there is not repeated; a key already set to ANOTHER value
+    # (loglevel=5) is the user's: it stays, ours is not added, and the note goes
+    # to stderr so the substitution capturing this function's output stays clean
+    local -a toks=() add=()
+    read -ra toks <<<"$1"
+    local w k t have kept keyed
+    for w in "${QB_TOKENS[@]}"; do
+        k=${w%%=*}; have=""; kept=""
+        case "$w" in *=*) keyed=1 ;; *) keyed="" ;; esac # presence by key is
+        # only for key=value tokens; a plain token counts by its exact self
+        for t in "${toks[@]}"; do
+            [ "$t" = "$w" ] && { have=1; break; }
+            [ -n "$keyed" ] && [ "${t%%=*}" = "$k" ] && { have=foreign; kept=$t; }
+        done
+        case "$have" in
+            1) ;;
+            foreign) printf '  your %s stays, so %s is not added\n' "$kept" "$w" >&2 ;;
+            *) add+=("$w") ;;
+        esac
+    done
+    local out=("${toks[@]}" "${add[@]}")
+    printf '%s' "${out[*]}"
+}
+
+qb_strip() { # a kernel cmdline -> the same line minus exactly our tokens (a key
+    # set to a different value -- loglevel=5 -- is not ours and stays)
+    local -a toks=() out=()
+    read -ra toks <<<"$1"
+    local t w drop
+    for t in "${toks[@]}"; do
+        drop=""
+        for w in "${QB_TOKENS[@]}"; do [ "$t" = "$w" ] && { drop=1; break; }; done
+        [ -z "$drop" ] && out+=("$t")
+    done
+    printf '%s' "${out[*]}"
+}
+
+qb_xform_line() { # $1 kind (sdboot|limine|grub), $2 on|off, $3 line -> the line,
+    # edited if it is one of the kind's own, untouched otherwise
+    local kind=$1 mode=$2 line=$3 rest pre v inner q
+    case "$kind" in
+        sdboot)
+            if [[ $line =~ ^options[[:space:]]+(.*)$ ]]; then
+                rest=${BASH_REMATCH[1]}
+                if [ "$mode" = on ]; then printf 'options %s' "$(qb_add "$rest")"
+                else printf 'options %s' "$(qb_strip "$rest")"; fi
+            else printf '%s' "$line"; fi ;;
+        limine)
+            if [[ $line =~ ^([[:space:]]*)(kernel_command_line|cmdline):[[:space:]]*(.*)$ ]]; then
+                pre="${BASH_REMATCH[1]}${BASH_REMATCH[2]}: " rest=${BASH_REMATCH[3]}
+                if [ "$mode" = on ]; then printf '%s%s' "$pre" "$(qb_add "$rest")"
+                else printf '%s%s' "$pre" "$(qb_strip "$rest")"; fi
+            else printf '%s' "$line"; fi ;;
+        grub)
+            if [[ $line =~ ^(GRUB_CMDLINE_LINUX_DEFAULT[[:space:]]*=[[:space:]]*)(.*)$ ]]; then
+                pre=${BASH_REMATCH[1]} v=${BASH_REMATCH[2]} inner=$v q=""
+                case "$v" in
+                    \"*\") q='"'; inner=${v:1:${#v}-2} ;;
+                    \'*\') q="'"; inner=${v:1:${#v}-2} ;;
+                esac
+                if [ "$mode" = on ]; then inner=$(qb_add "$inner")
+                else inner=$(qb_strip "$inner"); fi
+                # a bare value is one word by definition: if the result has
+                # spaces it has to be quoted, or grub reads a different line
+                [ -z "$q" ] && case "$inner" in *" "*) q='"' ;; esac
+                printf '%s%s%s%s' "$pre" "$q" "$inner" "$q"
+            else printf '%s' "$line"; fi ;;
+        *) printf '%s' "$line" ;;
+    esac
+}
+
+qb_backup() { # one-time backup beside the file, only if there is none yet: the
+    # first copy is the pre-galaga original, later edits never overwrite it
+    [ -e "$1.galaga-bak" ] || sudo cp -a "$1" "$1.galaga-bak"
+}
+
+qb_apply() { # $1 file, $2 kind, $3 on|off: rewrite the kind's lines in the file.
+    # Returns 0 -- changed (would change, on a dry run), 2 -- already as asked,
+    # 1 -- no such file. The transform runs line by line over a copy; the file
+    # itself is replaced only when something actually moved
+    local file=$1 kind=$2 mode=$3
+    [ -f "$file" ] || return 1
+    local tmp line
+    tmp=$(mktemp)
+    while IFS= read -r line || [ -n "$line" ]; do
+        printf '%s\n' "$(qb_xform_line "$kind" "$mode" "$line")"
+    done <"$file" >"$tmp"
+    if cmp -s "$file" "$tmp"; then rm -f "$tmp"; return 2; fi
+    if [ "$DRY" = 1 ]; then
+        note "would rewrite the $kind line(s) in $file"
+        rm -f "$tmp"
+        return 0
+    fi
+    qb_backup "$file"
+    sudo cp "$tmp" "$file"
+    rm -f "$tmp"
+    note "$file: $kind line(s) updated (backup: $file.galaga-bak)"
+    return 0
+}
+
+qb_cmdline() { # $1 on|off -- layer 1: the kernel command line, in whichever
+    # bootloader layouts this machine positively has
+    local mode=$1 seen="" rc f lf ch same act=added
+    [ "$mode" = off ] && act=removed
+    # systemd-boot: the options line of every entry
+    ch=0; same=0
+    for f in "$QB_BOOT_DIR"/loader/entries/*.conf; do
+        [ -f "$f" ] || continue
+        grep -q '^options[[:space:]]' "$f" || continue
+        seen=1
+        rc=0; qb_apply "$f" sdboot "$mode" || rc=$?
+        case "$rc" in 0) ch=1 ;; 2) same=1 ;; esac
+    done
+    if [ "$ch" = 1 ]; then QB_LAYOUTS+=(systemd-boot); QB_DID+=("kernel line: tokens $act in the systemd-boot entries")
+    elif [ "$same" = 1 ]; then QB_LAYOUTS+=(systemd-boot); QB_SKIP+=("kernel line (systemd-boot): already as asked"); fi
+    # limine: /boot/limine.conf, else the copy on the EFI partition
+    lf=""
+    if [ -f "$QB_BOOT_DIR/limine.conf" ]; then lf=$QB_BOOT_DIR/limine.conf
+    elif [ -f "$QB_LIMINE_EFI" ]; then lf=$QB_LIMINE_EFI; fi
+    if [ -n "$lf" ]; then
+        seen=1
+        if grep -Eq '^[[:space:]]*(kernel_command_line|cmdline):' "$lf"; then
+            QB_LAYOUTS+=(limine)
+            rc=0; qb_apply "$lf" limine "$mode" || rc=$?
+            case "$rc" in
+                0) QB_DID+=("kernel line: tokens $act in $lf") ;;
+                2) QB_SKIP+=("kernel line (limine): already as asked") ;;
+            esac
+        else
+            QB_SKIP+=("$lf has no kernel_command_line/cmdline line -- that layout is not recognized, left alone")
+        fi
+    fi
+    # grub: the defaults file, then the generated config is rebuilt
+    if [ -f "$QB_GRUB_CONF" ] && grep -q '^GRUB_CMDLINE_LINUX_DEFAULT[[:space:]]*=' "$QB_GRUB_CONF"; then
+        seen=1; QB_LAYOUTS+=(grub)
+        rc=0; qb_apply "$QB_GRUB_CONF" grub "$mode" || rc=$?
+        case "$rc" in
+            0) QB_DID+=("kernel line: tokens $act in $QB_GRUB_CONF, $QB_GRUB_CFG regenerated")
+                run sudo grub-mkconfig -o "$QB_GRUB_CFG" ;;
+            2) QB_SKIP+=("kernel line (grub): already as asked") ;;
+        esac
+    fi
+    if [ ${#QB_LAYOUTS[@]} -gt 1 ]; then
+        note "several bootloader layouts are present (${QB_LAYOUTS[*]}) -- each was edited; the tokens do nothing in one that never boots"
+    fi
+    if [ -z "${QB_LAYOUTS[*]}" ] && [ -z "$seen" ]; then
+        # nothing editable matched: unified kernel images carry the line inside
+        # the image itself, and anything else is a layout this does not know
+        local uki=""
+        for f in "$QB_BOOT_DIR"/*.efi "$QB_BOOT_DIR"/EFI/Linux/*.efi; do
+            [ -f "$f" ] && { uki=1; break; }
+        done
+        if [ -n "$uki" ]; then
+            QB_SKIP+=("kernel line: it is baked into the unified kernel images under $QB_BOOT_DIR -- nothing here can edit it, this layer is skipped")
+        else
+            QB_SKIP+=("kernel line: bootloader layout not recognized -- no changes made to it")
+        fi
+    fi
+}
+
+qb_plymouth_layer() { # report only: 'splash' is on the line now, and the splash
+    # shows only if plymouth is installed AND in the initramfs hooks -- neither
+    # is installed or re-hooked from here, so a missing piece gets one honest line
+    if ! command -v plymouth >/dev/null 2>&1; then
+        QB_SKIP+=("splash: plymouth is not installed, so there is no splash screen -- the kernel text is off, but the console can still show between the firmware and the login face")
+        return 0
+    fi
+    if [ ! -f "$QB_MKINITCPIO" ]; then
+        QB_SKIP+=("splash: plymouth is installed, but there is no $QB_MKINITCPIO to check its hooks against")
+        return 0
+    fi
+    local hooks
+    hooks=$(sed -n 's/^[[:space:]]*HOOKS=(\(.*\))[[:space:]]*$/\1/p' "$QB_MKINITCPIO" | head -n 1)
+    case " $hooks " in
+        *" plymouth "*) QB_DID+=("splash: plymouth is installed and in the mkinitcpio hooks -- the splash will show") ;;
+        *) QB_SKIP+=("splash: plymouth is installed but not in the mkinitcpio HOOKS -- the splash will not show until the hook is added and the initramfs rebuilt") ;;
+    esac
+}
+
+quiet_boot() { # $1 on|off -- the summary prints what changed and what was left
+    # alone and why; nothing here claims a change it did not make
+    local mode=$1 x didword=changed
+    QB_DID=(); QB_SKIP=(); QB_LAYOUTS=()
+    if [ "$mode" = on ]; then say "quiet boot: the console stays dark"
+    else say "quiet boot off: the boot text comes back"; fi
+    qb_cmdline "$mode"
+    [ "$mode" = on ] && qb_plymouth_layer
+    [ "$DRY" = 1 ] && didword="would change"
+    for x in "${QB_DID[@]}"; do note "$didword: $x"; done
+    for x in "${QB_SKIP[@]}"; do note "left alone: $x"; done
+    if [ "$mode" = on ]; then say "takes effect from the next boot. undo: ./install.sh --no-quiet-boot"
+    else say "the boot text is back from the next boot"; fi
+}
+# ---- end quiet boot --------------------------------------------------------------
+
 
 [ "$EUID" -eq 0 ] && { echo "run as your user, sudo will ask by itself"; exit 1; }
 
@@ -1139,6 +1360,8 @@ case "${1:-}" in
     --links) links; browser_cleanup; flatpak_gtk; tmux_theme ;; # on any distribution (NixOS, Fedora...): packages are up to you then, list in README
     --greeter) command -v pacman >/dev/null || { echo "the greeter step installs greetd with pacman (Arch only)"; exit 1; }
         greeter ;;
+    --quiet-boot) [ "${2:-}" = --dry-run ] && DRY=1; quiet_boot on ;;
+    --no-quiet-boot) [ "${2:-}" = --dry-run ] && DRY=1; quiet_boot off ;;
     --dry-run) command -v pacman >/dev/null || { echo "I only install packages on Arch; on another distribution: $0 --links"; exit 1; }
         DRY=1; install_flow ;;
     --update) update ;;
@@ -1148,5 +1371,5 @@ case "${1:-}" in
     ""|--with) command -v pacman >/dev/null || { echo "I only install packages on Arch; on another distribution: $0 --links"; exit 1; }
         [ "${1:-}" = --with ] && WITH="${*:2}" # both comma- and space-separated
         install_flow ;;
-    *) echo "usage: $0 [--with telegram,spotify,clash,pywalfox,warp,overskride] [--browsers firefox,zen,chromium,brave,vivaldi] | --links | --greeter | --dry-run | --update | --fix-plasma | --uninstall]"; exit 1 ;;
+    *) echo "usage: $0 [--with telegram,spotify,clash,pywalfox,warp,overskride] [--browsers firefox,zen,chromium,brave,vivaldi] | --links | --greeter | --quiet-boot | --no-quiet-boot | --dry-run | --update | --fix-plasma | --uninstall]"; exit 1 ;;
 esac
