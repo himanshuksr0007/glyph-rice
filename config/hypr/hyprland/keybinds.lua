@@ -116,10 +116,12 @@ local kbLockGroup = hl.version():match("^0%.5[0-6]%.") and hl.dsp.group.lock_act
 hl.bind("SUPER + SHIFT + Comma", kbLockGroup)
 
 -- Window actions
-hl.bind("SUPER + left", hl.dsp.focus({ direction = "left" }))
-hl.bind("SUPER + right", hl.dsp.focus({ direction = "right" }))
-hl.bind("SUPER + up", hl.dsp.focus({ direction = "up" }))
-hl.bind("SUPER + down", hl.dsp.focus({ direction = "down" }))
+-- super+arrows snap (the shell's snap service); snapping off in
+-- settings -> windows and the service moves focus instead, as these used to
+hl.bind("SUPER + left", hl.dsp.global("shell:snapleft"))
+hl.bind("SUPER + right", hl.dsp.global("shell:snapright"))
+hl.bind("SUPER + up", hl.dsp.global("shell:snapup"))
+hl.bind("SUPER + down", hl.dsp.global("shell:snapdown"))
 hl.bind("SUPER + SHIFT + left", hl.dsp.window.move({ direction = "left" }))
 hl.bind("SUPER + SHIFT + right", hl.dsp.window.move({ direction = "right" }))
 hl.bind("SUPER + SHIFT + up", hl.dsp.window.move({ direction = "up" }))

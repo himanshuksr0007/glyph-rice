@@ -192,6 +192,10 @@ ShellRoot {
     Shortcut { name: "quick"; description: "quick settings"; onPressed: quick.toggle() }
     Shortcut { name: "ward"; description: "quick settings"; onPressed: quick.toggle() } // Super+N in demonshot -- same toggles
     Shortcut { name: "settings"; description: "settings"; onPressed: shell.toggleSettings() }
+    Shortcut { name: "snapleft"; description: "snap window left"; onPressed: Snap.snapDir("left") }
+    Shortcut { name: "snapright"; description: "snap window right"; onPressed: Snap.snapDir("right") }
+    Shortcut { name: "snapup"; description: "snap window up"; onPressed: Snap.snapDir("up") }
+    Shortcut { name: "snapdown"; description: "snap window down"; onPressed: Snap.snapDir("down") }
     Shortcut { name: "power"; description: "power menu"; onPressed: power.toggle() }
     Shortcut { name: "shot"; description: "screenshot"; onPressed: shot.open() }
     Shortcut { name: "pact"; description: "vpn: clash verge"; onPressed: vpn.toggle() }
