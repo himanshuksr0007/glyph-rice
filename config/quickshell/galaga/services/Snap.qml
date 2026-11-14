@@ -19,7 +19,9 @@ import qs.settings
 // placed rects share a full edge. regroup() rebuilds the groups per workspace
 // from the stored rects after every placement, so the rule is one and the same
 // however the windows got there. A group never spans workspaces, and holds at
-// most four windows (the grid is the largest layout).
+// most four windows (the grid is the largest layout). Grouped windows resize
+// together: resize one and the watcher moves the shared boundary for its
+// neighbours (linkedResize below; settings -> windows -> resize neighbours).
 //
 // Geometry has no hyprland event and a toplevel's lastIpcObject is a snapshot
 // from the last full fetch, so actions and the group watcher both read fresh
@@ -454,12 +456,62 @@ Singleton {
                 saveRec(addr, rec);
                 continue;
             }
-            // the user took it: dragged away, or resized out of its space.
-            // Either way it is a free window again -- record cleared, left
-            // floating exactly where it is.
-            touched[rec.ws] = true;
-            dropRec(addr);
+            const sizeSame = cur.w === rec.rect.w && cur.h === rec.rect.h;
+            if (sizeSame) {
+                // dragged away whole: a free window again -- record cleared,
+                // left floating exactly where it was dropped
+                touched[rec.ws] = true;
+                dropRec(addr);
+                continue;
+            }
+            // resized. In a group, with linked resize on, the neighbours'
+            // shared edges follow and the record learns the new rect; anywhere
+            // else the window has left its space, and the record ends with it.
+            const gid = groupOf(addr);
+            if (Theme.state.snapLinked && gid) {
+                linkedResize(addr, rec.rect, cur, gid);
+                rec.rect = cur;
+                saveRec(addr, rec);
+            } else {
+                touched[rec.ws] = true;
+                dropRec(addr);
+            }
         }
         for (const ws in touched) regroupWs(Number(ws));
+    }
+
+    function spansOverlap(p1, l1, p2, l2) { return p1 < p2 + l2 && p2 < p1 + l1; }
+    // M was resized from oldR to newR: every group mate sharing an edge with
+    // M's old rect has that boundary moved to M's new edge -- its far edge
+    // stays, so it grows or shrinks into the space. In a 2x2 group a corner
+    // window shares one vertical and one horizontal edge, so both mates move
+    // and the cross follows. A mate that would end up under 240x160 is left.
+    function linkedResize(addr, oldR, newR, gid) {
+        let applied = false;
+        for (const n of (groups[gid] ?? [])) {
+            if (n === addr) continue;
+            const nr = recs[n];
+            if (!nr) continue;
+            const r = nr.rect;
+            let nx = r.x, ny = r.y, nw = r.w, nh = r.h, adj = false;
+            if (Math.abs(oldR.x + oldR.w - r.x) <= 3 && spansOverlap(oldR.y, oldR.h, r.y, r.h)) {
+                const b = newR.x + newR.w; nx = b; nw = r.x + r.w - b; adj = true;
+            } else if (Math.abs(oldR.x - (r.x + r.w)) <= 3 && spansOverlap(oldR.y, oldR.h, r.y, r.h)) {
+                nw = newR.x - r.x; adj = true;
+            }
+            if (Math.abs(oldR.y + oldR.h - r.y) <= 3 && spansOverlap(oldR.x, oldR.w, r.x, r.w)) {
+                const b = newR.y + newR.h; ny = b; nh = r.y + r.h - b; adj = true;
+            } else if (Math.abs(oldR.y - (r.y + r.h)) <= 3 && spansOverlap(oldR.x, oldR.w, r.x, r.w)) {
+                nh = newR.y - r.y; adj = true;
+            }
+            if (!adj || nw < 240 || nh < 160) continue;
+            const nrect = { x: nx, y: ny, w: nw, h: nh };
+            dsp(resizeStr(n, nrect));
+            dsp(moveStr(n, nrect));
+            nr.rect = nrect;
+            saveRec(n, nr);
+            applied = true;
+        }
+        if (applied) guard();
     }
 }

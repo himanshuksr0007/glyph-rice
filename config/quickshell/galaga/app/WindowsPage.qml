@@ -31,6 +31,24 @@ Item {
             Column {
                 width: parent.width
                 spacing: 10
+                SetHead { text: "snapping" }
+                SetCard {
+                    SetToggle { label: "window snapping"; sub: "super + arrow keys snap · super + z opens layouts. off: the arrows move focus again"; on: Theme.state.snap; onFlip: want => Theme.state.snap = want }
+                    SetToggle { label: "resize neighbours together"; sub: "drag one snapped window's edge and its neighbour follows"; on: Theme.state.snapLinked; onFlip: want => Theme.state.snapLinked = want }
+                    SetToggle { label: "snap assist"; sub: "after snapping, offer the other windows to fill the space"; on: Theme.state.snapAssist; divider: false; onFlip: want => Theme.state.snapAssist = want }
+                }
+                SetCard {
+                    SetRow { label: "super + ← →"; value: "halves" }
+                    SetRow { label: "super + ↑"; value: "corners, then maximise" }
+                    SetRow { label: "super + ↓"; value: "restore, then minimise" }
+                    SetRow { label: "super + z"; value: "layouts" }
+                    SetRow { label: "super + shift + drag"; value: "move a window"; divider: false }
+                }
+            }
+
+            Column {
+                width: parent.width
+                spacing: 10
                 SetHead { text: "windows" }
                 Lb { text: `hyprland · gaps ${gIn.v} / ${gOut.v} · border ${bord.v} · rounding ${rnd.v} · panels ${pan.v} %`; px: 11; color: Theme.mute }
                 ScreenMock {
