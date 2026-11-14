@@ -136,7 +136,7 @@ hl.bind("SUPER + ALT + up", hl.dsp.window.resize(fn.resize_active_window(0, -10)
 hl.bind("SUPER + ALT + down", hl.dsp.window.resize(fn.resize_active_window(0, 10)), { repeating = true })
 
 hl.bind("SUPER + SHIFT + mouse:272", hl.dsp.window.drag(), { mouse = true })
-hl.bind(vars.kbMoveWindow, hl.dsp.window.drag(), { mouse = true })
+hl.bind("SUPER + Z", hl.dsp.global("shell:snaplayouts")) -- snap layouts; dragging a window stays on super+shift+mouse above, so kbMoveWindow has no bind left
 hl.bind("SUPER + mouse:272", hl.dsp.window.resize(), { mouse = true })
 hl.bind(vars.kbResizeWindow, hl.dsp.window.resize(), { mouse = true })
 hl.bind("CTRL + SUPER + Backslash", hl.dsp.window.center())

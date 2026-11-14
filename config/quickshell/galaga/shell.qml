@@ -21,6 +21,7 @@ import "power"
 import "quick"
 import "settings"
 import "shot"
+import "snap"
 import "vpn"
 import "wall"
 import "welcome"
@@ -55,6 +56,7 @@ ShellRoot {
     Expose { id: expose }
     Genie {}
     Shot { id: shot }
+    SnapPop {}
     Vpn { id: vpn }
     LazyLoader { active: !Theme.state.welcomed; Welcome {} } // the first-login card; the features page brings it back
     readonly property bool autoGame: Game.on // starts services/Game: a fullscreen game turns on game mode and dnd
@@ -196,6 +198,7 @@ ShellRoot {
     Shortcut { name: "snapright"; description: "snap window right"; onPressed: Snap.snapDir("right") }
     Shortcut { name: "snapup"; description: "snap window up"; onPressed: Snap.snapDir("up") }
     Shortcut { name: "snapdown"; description: "snap window down"; onPressed: Snap.snapDir("down") }
+    Shortcut { name: "snaplayouts"; description: "snap layouts"; onPressed: Snap.toggleLayouts() }
     Shortcut { name: "power"; description: "power menu"; onPressed: power.toggle() }
     Shortcut { name: "shot"; description: "screenshot"; onPressed: shot.open() }
     Shortcut { name: "pact"; description: "vpn: clash verge"; onPressed: vpn.toggle() }
